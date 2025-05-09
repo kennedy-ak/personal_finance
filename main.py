@@ -62,7 +62,7 @@ def initialize_database():
         if cur.fetchone() is None:
             # Default credentials (username: admin, password: Ybok7619)
             default_username = "admin"
-            default_password = "Ybok7619"
+            default_password = ""
             
             # Hash the password for storage
             hashed_password = hashlib.sha256(default_password.encode()).hexdigest()
