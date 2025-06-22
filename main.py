@@ -1,20 +1,23 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 from datetime import datetime
 import hashlib
-import psycopg2
-from psycopg2 import sql
-from psycopg2.extras import RealDictCursor
-from dotenv import load_dotenv
-load_dotenv()
+import sqlite3
 import os
+
+# Try to import plotly, with fallback
+try:
+    import plotly.express as px
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+    st.warning("Plotly not available. Charts will be disabled. Install with: pip install plotly")
 
 # Set page configuration
 st.set_page_config(page_title="Personal Expense Tracker", layout="wide")
 
-# Database connection parameters
-DB_CONNECTION = os.getenv("DB_CONNECTION")
+# Database file path
+DB_PATH = "expense_tracker.db"
 
 # Initialize session state for authentication
 if 'authenticated' not in st.session_state:
@@ -24,7 +27,7 @@ if 'authenticated' not in st.session_state:
 def initialize_database():
     """Create necessary database tables if they don't exist"""
     try:
-        conn = psycopg2.connect(DB_CONNECTION)
+        conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         
         # Create users table
@@ -38,18 +41,18 @@ def initialize_database():
         # Create accounts table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS accounts (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            balance NUMERIC(15, 2) DEFAULT 0
+            balance REAL DEFAULT 0
         )
         """)
         
         # Create transactions table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             type TEXT NOT NULL,
-            amount NUMERIC(15, 2) NOT NULL,
+            amount REAL NOT NULL,
             account TEXT NOT NULL,
             category TEXT NOT NULL,
             description TEXT,
@@ -58,29 +61,29 @@ def initialize_database():
         """)
         
         # Check if default user exists, if not create it
-        cur.execute("SELECT * FROM users WHERE username = %s", ("admin",))
+        cur.execute("SELECT * FROM users WHERE username = ?", ("admin",))
         if cur.fetchone() is None:
-            # Default credentials (username: admin, password: Ybok7619)
+            # Default credentials (username: admin, password: admin123)
             default_username = "admin"
-            default_password = ""
+            default_password = "admin123"
             
             # Hash the password for storage
             hashed_password = hashlib.sha256(default_password.encode()).hexdigest()
             
-            cur.execute("INSERT INTO users (username, password) VALUES (%s, %s)",
+            cur.execute("INSERT INTO users (username, password) VALUES (?, ?)",
                       (default_username, hashed_password))
         
         # Check if default accounts exist, if not create them
         cur.execute("SELECT COUNT(*) FROM accounts")
         if cur.fetchone()[0] == 0:
             default_accounts = [
-                "Fedility Account 1",
+                "Fidelity Account 1",
                 "Access Account 2",
                 "Mobile Money Account 3",
                 "Cash"
             ]
             for account in default_accounts:
-                cur.execute("INSERT INTO accounts (name, balance) VALUES (%s, 0)", (account,))
+                cur.execute("INSERT INTO accounts (name, balance) VALUES (?, 0)", (account,))
         
         conn.commit()
         cur.close()
@@ -93,14 +96,14 @@ def initialize_database():
 # Authentication function
 def authenticate(username, password):
     try:
-        conn = psycopg2.connect(DB_CONNECTION)
+        conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         
         # Hash the provided password
         hashed_password = hashlib.sha256(password.encode()).hexdigest()
         
         # Check credentials against database
-        cur.execute("SELECT * FROM users WHERE username = %s AND password = %s", 
+        cur.execute("SELECT * FROM users WHERE username = ? AND password = ?", 
                   (username, hashed_password))
         result = cur.fetchone()
         
@@ -116,8 +119,9 @@ def authenticate(username, password):
 def get_accounts():
     """Get all accounts and their balances"""
     try:
-        conn = psycopg2.connect(DB_CONNECTION)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row  # This makes rows behave like dictionaries
+        cur = conn.cursor()
         cur.execute("SELECT name, balance FROM accounts ORDER BY name")
         accounts = {row['name']: float(row['balance']) for row in cur.fetchall()}
         cur.close()
@@ -130,15 +134,15 @@ def get_accounts():
 def get_transactions():
     """Get all transactions"""
     try:
-        conn = psycopg2.connect(DB_CONNECTION)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
         cur.execute("""
-        SELECT type, amount, account, category, description, 
-               TO_CHAR(date, 'YYYY-MM-DD') as date 
+        SELECT type, amount, account, category, description, date
         FROM transactions
-        ORDER BY date DESC
+        ORDER BY date DESC, id DESC
         """)
-        transactions = cur.fetchall()
+        transactions = [dict(row) for row in cur.fetchall()]
         cur.close()
         conn.close()
         return transactions
@@ -149,23 +153,23 @@ def get_transactions():
 def add_transaction(transaction_type, amount, account, category, description, date):
     """Add a new transaction and update account balance"""
     try:
-        conn = psycopg2.connect(DB_CONNECTION)
+        conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         
         # Insert the transaction
         cur.execute("""
         INSERT INTO transactions (type, amount, account, category, description, date)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        VALUES (?, ?, ?, ?, ?, ?)
         """, (transaction_type, amount, account, category, description, date))
         
         # Update account balance
         if transaction_type == "Expense":
             cur.execute("""
-            UPDATE accounts SET balance = balance - %s WHERE name = %s
+            UPDATE accounts SET balance = balance - ? WHERE name = ?
             """, (amount, account))
         else:  # Income
             cur.execute("""
-            UPDATE accounts SET balance = balance + %s WHERE name = %s
+            UPDATE accounts SET balance = balance + ? WHERE name = ?
             """, (amount, account))
         
         conn.commit()
@@ -179,11 +183,11 @@ def add_transaction(transaction_type, amount, account, category, description, da
 def update_account_balance(account, new_balance):
     """Update an account's balance"""
     try:
-        conn = psycopg2.connect(DB_CONNECTION)
+        conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         
         cur.execute("""
-        UPDATE accounts SET balance = %s WHERE name = %s
+        UPDATE accounts SET balance = ? WHERE name = ?
         """, (new_balance, account))
         
         conn.commit()
@@ -197,6 +201,9 @@ def update_account_balance(account, new_balance):
 # Login Page
 def login_page():
     st.title("Login to Personal Expense Tracker")
+    
+    # Display default credentials info
+    st.info("💡 Default login credentials:\n- Username: admin\n- Password: admin123")
     
     with st.form("login_form"):
         username = st.text_input("Username")
@@ -252,8 +259,11 @@ else:
         
         with col2:
             if sum(accounts.values()) > 0:
-                fig = px.pie(account_df, values='Balance', names='Account', title="Balance Distribution")
-                st.plotly_chart(fig, use_container_width=True)
+                if PLOTLY_AVAILABLE:
+                    fig = px.pie(account_df, values='Balance', names='Account', title="Balance Distribution")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.bar_chart(account_df.set_index('Account')['Balance'])
         
         # Display recent transactions
         st.subheader("Recent Transactions")
@@ -274,8 +284,11 @@ else:
             
             if not expenses_df.empty:
                 category_summary = expenses_df.groupby('category')['amount'].sum().reset_index()
-                fig = px.bar(category_summary, x='category', y='amount', title="Expenses by Category")
-                st.plotly_chart(fig, use_container_width=True)
+                if PLOTLY_AVAILABLE:
+                    fig = px.bar(category_summary, x='category', y='amount', title="Expenses by Category")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.bar_chart(category_summary.set_index('category')['amount'])
             else:
                 st.info("No expense transactions recorded yet.")
     
@@ -294,7 +307,7 @@ else:
             amount = st.number_input("Amount", min_value=0.01, format="%.2f")
             account = st.selectbox("Account", list(accounts.keys()))
             category = st.selectbox("Category", 
-                                  ["Food", "Transport",  "Utilities", "Entertainment", 
+                                  ["Food", "Transport", "Utilities", "Entertainment", 
                                     "Shopping", "Education", "Salary", "Gift", "Other"])
             description = st.text_area("Description", placeholder="Enter details about the transaction")
             date = st.date_input("Date", datetime.now())
@@ -402,4 +415,4 @@ else:
     
     # Footer
     st.sidebar.markdown("---")
-    st.sidebar.info("Personal Expense Tracker - v1.0 (PostgreSQL)") 
+    st.sidebar.info("Personal Expense Tracker - v1.0 (SQLite)")
